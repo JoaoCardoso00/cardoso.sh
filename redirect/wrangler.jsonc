@@ -1,0 +1,17 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "joao-cardoso-redirect",
+  "main": "./index.js",
+  "compatibility_date": "2026-09-21",
+  // Routes rather than custom domains. Both names are already proxied by
+  // Cloudflare, so the Worker intercepts the request before it reaches the old
+  // Vercel origin and no DNS record changes. Removing these routes restores
+  // the old site.
+  "routes": [
+    { "pattern": "joao-cardoso.com/*", "zone_name": "joao-cardoso.com" },
+    { "pattern": "www.joao-cardoso.com/*", "zone_name": "joao-cardoso.com" }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}

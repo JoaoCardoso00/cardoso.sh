@@ -1,0 +1,18 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "cardoso-sh",
+  // TanStack Start's server build already exports a module worker: `{ fetch }`.
+  "main": "./dist/server/server.js",
+  "compatibility_date": "2026-09-21",
+  "compatibility_flags": ["nodejs_compat"],
+  "routes": [{ "pattern": "cardoso.sh", "custom_domain": true }],
+  "assets": {
+    "directory": "./dist/client",
+    // Unmatched requests fall through to the Worker, which renders the route or the 404 page.
+    "not_found_handling": "none",
+    "html_handling": "none"
+  },
+  "observability": {
+    "enabled": true
+  }
+}
