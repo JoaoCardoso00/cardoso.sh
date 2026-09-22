@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as SitemapDotxmlRouteImport } from './routes/sitemap[.]xml'
 import { Route as Char123LocaleChar125RouteRouteImport } from './routes/{-$locale}/route'
+import { Route as LabLiquidGlassRouteImport } from './routes/lab/liquid-glass'
 import { Route as Char123LocaleChar125IndexRouteImport } from './routes/{-$locale}/index'
 import { Route as Char123LocaleChar125ProjectsRouteImport } from './routes/{-$locale}/projects'
 
@@ -25,6 +26,11 @@ const Char123LocaleChar125RouteRoute =
     path: '/{-$locale}',
     getParentRoute: () => rootRouteImport,
   } as any)
+const LabLiquidGlassRoute = LabLiquidGlassRouteImport.update({
+  id: '/lab/liquid-glass',
+  path: '/lab/liquid-glass',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const Char123LocaleChar125IndexRoute =
   Char123LocaleChar125IndexRouteImport.update({
     id: '/',
@@ -41,11 +47,13 @@ const Char123LocaleChar125ProjectsRoute =
 export interface FileRoutesByFullPath {
   '/{-$locale}': typeof Char123LocaleChar125RouteRouteWithChildren
   '/sitemap.xml': typeof SitemapDotxmlRoute
+  '/lab/liquid-glass': typeof LabLiquidGlassRoute
   '/{-$locale}/projects': typeof Char123LocaleChar125ProjectsRoute
   '/{-$locale}/': typeof Char123LocaleChar125IndexRoute
 }
 export interface FileRoutesByTo {
   '/sitemap.xml': typeof SitemapDotxmlRoute
+  '/lab/liquid-glass': typeof LabLiquidGlassRoute
   '/{-$locale}/projects': typeof Char123LocaleChar125ProjectsRoute
   '/{-$locale}': typeof Char123LocaleChar125IndexRoute
 }
@@ -53,19 +61,29 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/{-$locale}': typeof Char123LocaleChar125RouteRouteWithChildren
   '/sitemap.xml': typeof SitemapDotxmlRoute
+  '/lab/liquid-glass': typeof LabLiquidGlassRoute
   '/{-$locale}/projects': typeof Char123LocaleChar125ProjectsRoute
   '/{-$locale}/': typeof Char123LocaleChar125IndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
-    '/{-$locale}' | '/sitemap.xml' | '/{-$locale}/projects' | '/{-$locale}/'
+    | '/{-$locale}'
+    | '/sitemap.xml'
+    | '/lab/liquid-glass'
+    | '/{-$locale}/projects'
+    | '/{-$locale}/'
   fileRoutesByTo: FileRoutesByTo
-  to: '/sitemap.xml' | '/{-$locale}/projects' | '/{-$locale}'
+  to:
+    | '/sitemap.xml'
+    | '/lab/liquid-glass'
+    | '/{-$locale}/projects'
+    | '/{-$locale}'
   id:
     | '__root__'
     | '/{-$locale}'
     | '/sitemap.xml'
+    | '/lab/liquid-glass'
     | '/{-$locale}/projects'
     | '/{-$locale}/'
   fileRoutesById: FileRoutesById
@@ -73,6 +91,7 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   Char123LocaleChar125RouteRoute: typeof Char123LocaleChar125RouteRouteWithChildren
   SitemapDotxmlRoute: typeof SitemapDotxmlRoute
+  LabLiquidGlassRoute: typeof LabLiquidGlassRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -89,6 +108,13 @@ declare module '@tanstack/react-router' {
       path: '/{-$locale}'
       fullPath: '/{-$locale}'
       preLoaderRoute: typeof Char123LocaleChar125RouteRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/lab/liquid-glass': {
+      id: '/lab/liquid-glass'
+      path: '/lab/liquid-glass'
+      fullPath: '/lab/liquid-glass'
+      preLoaderRoute: typeof LabLiquidGlassRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/{-$locale}/': {
@@ -127,6 +153,7 @@ const Char123LocaleChar125RouteRouteWithChildren =
 const rootRouteChildren: RootRouteChildren = {
   Char123LocaleChar125RouteRoute: Char123LocaleChar125RouteRouteWithChildren,
   SitemapDotxmlRoute: SitemapDotxmlRoute,
+  LabLiquidGlassRoute: LabLiquidGlassRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
