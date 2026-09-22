@@ -9,6 +9,7 @@ import {
   defaultSurface,
   filterMarkup,
   useGlassMaps,
+  useJelly,
   useSupportsBackdropSvg,
 } from '#/components/liquid-glass'
 import type { GlassLayers, GlassOptics, GlassSurface } from '#/components/liquid-glass'
@@ -72,6 +73,8 @@ function Sandbox() {
   const [animate, setAnimate] = useState(false)
   const [showMap, setShowMap] = useState(false)
   const [showCode, setShowCode] = useState(false)
+  const [stretch, setStretch] = useState(1)
+  const [bounce, setBounce] = useState(0.6)
 
   const supported = useSupportsBackdropSvg()
   const maps = useGlassMaps(
@@ -94,6 +97,8 @@ function Sandbox() {
     setOptics(defaultOptics)
     setSurface(defaultSurface)
     setLayers(defaultLayers)
+    setStretch(1)
+    setBounce(0.6)
   }
 
   function applyPreset(name: keyof typeof presets) {
@@ -106,7 +111,7 @@ function Sandbox() {
     <div className="flex min-h-dvh w-full bg-bg text-fg">
       <div className="relative min-h-dvh flex-1 overflow-hidden">
         <Scene kind={scene} animate={animate} />
-        <Draggable>
+        <Draggable stretch={stretch} bounce={bounce}>
           <LiquidGlass shape={shape} optics={optics} surface={surface} layers={layers} supported={supported} maps={maps}>
             <div className="flex h-full items-center justify-center px-6 text-center text-[15px]/5.5 font-medium tracking-[-0.01em] text-white [text-shadow:0_1px_2px_rgba(0,0,0,.35)] select-none">
               Drag me
@@ -163,6 +168,16 @@ function Sandbox() {
               pad {maps.pad}px
             </p>
           )}
+        </Section>
+
+        <Section title="Motion">
+          <Range label="Stretch" value={stretch} min={0} max={2} step={0.05} onChange={setStretch} />
+          <Range label="Bounce" value={bounce} min={0} max={1} step={0.05} onChange={setBounce} />
+          <p className="text-muted">
+            Squash and stretch while dragging. Speed stretches the glass along the motion; when it stops, the
+            spring overshoots into a squish before it settles. Bounce 0 never squishes, 1 wobbles like jelly. A
+            CSS scale, so the maps don't rebuild.
+          </p>
         </Section>
 
         <Section title="Optics">
@@ -244,14 +259,18 @@ function Sandbox() {
 }
 
 // Pointer drag with no library. Position is kept in a ref and written straight
-// to the transform so the displacement map does not rebuild while moving.
-function Draggable({ children }: { children: ReactNode }) {
+// to the transform so the displacement maps do not rebuild while moving. The
+// same position feeds the jelly spring, which deforms the glass in flight.
+function Draggable({ stretch, bounce, children }: { stretch: number; bounce: number; children: ReactNode }) {
   const el = useRef<HTMLDivElement>(null)
   const pos = useRef({ x: 120, y: 160 })
   const grab = useRef<{ dx: number; dy: number } | null>(null)
+  const jelly = useJelly(stretch, bounce)
 
   useEffect(() => {
+    jelly.ref.current = el.current
     el.current!.style.transform = `translate(${pos.current.x}px, ${pos.current.y}px)`
+    jelly.move(pos.current.x, pos.current.y)
   }, [])
 
   return (
@@ -266,6 +285,7 @@ function Draggable({ children }: { children: ReactNode }) {
         if (!grab.current) return
         pos.current = { x: e.clientX - grab.current.dx, y: e.clientY - grab.current.dy }
         e.currentTarget.style.transform = `translate(${pos.current.x}px, ${pos.current.y}px)`
+        jelly.move(pos.current.x, pos.current.y)
       }}
       onPointerUp={() => {
         grab.current = null

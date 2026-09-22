@@ -281,6 +281,115 @@ export function filterMarkup(id: string, maps: GlassMaps, optics: GlassOptics, l
   ].join('\n')
 }
 
+// Squash and stretch while the glass moves, like the tab bar lens in iOS 26.
+// Speed along an axis stretches the glass along it; when the motion stops the
+// spring overshoots and the glass squishes the other way before it settles.
+//
+// It's a CSS scale on the glass layers, driven through two custom properties
+// (--glass-sx, --glass-sy) set on any ancestor. Resizing the shape itself
+// would rebuild the maps, ~30ms each; a scale stretches the refraction, rim
+// and highlights together for free, which is also what Apple's lens does.
+// The children are not scaled.
+const deform = 'scale(var(--glass-sx, 1), var(--glass-sy, 1))'
+
+const STIFFNESS = 320
+// Largest stretch, as a fraction of the size, and the speed in px/s at which
+// the stretch reaches half of it.
+const MAX_STRETCH = 0.26
+const SPEED = 1600
+
+// Returns a ref for the element that carries the custom properties and a
+// `move` to call with the glass position whenever it changes. It runs its own
+// animation frame loop while the spring is moving, and none at rest. Nothing
+// goes through React state.
+//
+// `bounce` sets the damping. 0 is critically damped: it eases back without
+// ever squishing. The default 0.6 (damping ratio ~0.5) overshoots into one
+// soft squish when the glass stops and settles without wobbling back. 1 is
+// jelly.
+export function useJelly(stretch = 1, bounce = 0.6) {
+  const ref = useRef<HTMLElement | null>(null)
+  const gain = useRef(stretch)
+  gain.current = stretch
+  const damping = useRef(0)
+  damping.current = 2 * Math.sqrt(STIFFNESS) * (1 - 0.8 * bounce)
+  const s = useRef({ x: 0, y: 0, px: 0, py: 0, vx: 0, vy: 0, ex: 0, ey: 0, dex: 0, dey: 0, t: 0, raf: 0, seen: false })
+
+  useEffect(
+    () => () => {
+      cancelAnimationFrame(s.current.raf)
+      // Clear the id too, or `move` thinks a loop is still running after a
+      // remount (StrictMode does one in dev) and never starts another.
+      s.current.raf = 0
+    },
+    [],
+  )
+
+  function frame(now: number) {
+    const st = s.current
+    const dt = Math.min(1 / 30, (now - st.t) / 1000)
+    st.t = now
+    if (dt <= 0) {
+      st.raf = requestAnimationFrame(frame)
+      return
+    }
+
+    // Velocity of the glass, px/s, smoothed over several frames so a single
+    // uneven pointer event doesn't kick the spring.
+    st.vx += ((st.x - st.px) / dt - st.vx) * 0.25
+    st.vy += ((st.y - st.py) / dt - st.vy) * 0.25
+    st.px = st.x
+    st.py = st.y
+
+    // Quadratic onset, then saturation. A slow drag leaves the glass rigid
+    // (300px/s gives under 1%), and only a real swipe stretches it: 1000px/s
+    // is ~7%, 3000px/s ~20%. Linear onset made it wobble at every nudge.
+    const target = (v: number) => {
+      const q = (v / SPEED) ** 2
+      return MAX_STRETCH * gain.current * (q / (1 + q))
+    }
+    st.dex += (STIFFNESS * (target(st.vx) - st.ex) - damping.current * st.dex) * dt
+    st.dey += (STIFFNESS * (target(st.vy) - st.ey) - damping.current * st.dey) * dt
+    st.ex = Math.max(-0.4, st.ex + st.dex * dt)
+    st.ey = Math.max(-0.4, st.ey + st.dey * dt)
+
+    // Area stays the same: wider means shorter, like a drop of liquid.
+    const sx = (1 + st.ex) / (1 + st.ey)
+    const el = ref.current
+    el?.style.setProperty('--glass-sx', sx.toFixed(4))
+    el?.style.setProperty('--glass-sy', (1 / sx).toFixed(4))
+
+    const resting =
+      Math.abs(st.vx) + Math.abs(st.vy) < 1 &&
+      Math.abs(st.ex) + Math.abs(st.ey) < 1e-3 &&
+      Math.abs(st.dex) + Math.abs(st.dey) < 1e-2
+    if (resting) {
+      el?.style.removeProperty('--glass-sx')
+      el?.style.removeProperty('--glass-sy')
+      Object.assign(st, { vx: 0, vy: 0, ex: 0, ey: 0, dex: 0, dey: 0, raf: 0 })
+      return
+    }
+    st.raf = requestAnimationFrame(frame)
+  }
+
+  function move(x: number, y: number) {
+    const st = s.current
+    if (!st.seen) {
+      st.px = x
+      st.py = y
+      st.seen = true
+    }
+    st.x = x
+    st.y = y
+    if (!st.raf && gain.current > 0) {
+      st.t = performance.now()
+      st.raf = requestAnimationFrame(frame)
+    }
+  }
+
+  return { ref, move }
+}
+
 export function LiquidGlass({
   shape,
   optics,
@@ -327,7 +436,7 @@ export function LiquidGlass({
       {ready && <RefractionFilter id={filterId} maps={maps} optics={optics} layers={layers} />}
 
       {/* Clips the oversized filter layer to the glass shape. */}
-      <div className="absolute inset-0 isolate overflow-hidden" style={{ borderRadius: radius }}>
+      <div className="absolute inset-0 isolate overflow-hidden" style={{ borderRadius: radius, transform: deform }}>
         {/* 1. Refracted backdrop. The whole liquid part lives in this one declaration.
             The layer extends past the glass by `pad` so rim pixels that sample
             outward still have backdrop to read; the parent clips the excess. */}
@@ -392,7 +501,10 @@ export function LiquidGlass({
           painted before it becomes part of the backdrop, and a rim that samples
           outward would drag the shadow in as a dark ring. */}
       {layers.shadow && (
-        <div className="pointer-events-none absolute inset-0" style={{ borderRadius: radius, boxShadow: shadow }} />
+        <div
+          className="pointer-events-none absolute inset-0"
+          style={{ borderRadius: radius, boxShadow: shadow, transform: deform }}
+        />
       )}
 
       <div className="relative h-full w-full" style={{ borderRadius: radius }}>
