@@ -1,20 +1,19 @@
-import { useEffect, useId, useMemo, useState } from 'react'
+import { createElement, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
-import { buildGlassMaps } from '#/lib/liquid-glass'
-import type { GlassLight, GlassMaps, GlassShape } from '#/lib/liquid-glass'
+import { dispersion } from '#/lib/liquid-glass'
+import type { GlassLight, GlassMapRequest, GlassMaps, GlassShape } from '#/lib/liquid-glass'
 
 export interface GlassOptics {
   // Multiplies the physically solved offsets. 1 is the raw Snell result.
   strength: number
-  // Tiny blur applied to the rim only, before and after displacement.
-  // Chromium samples the displaced backdrop with nearest neighbour: where the
-  // rim compresses that shows as speckle (the pre-blur fixes it), where it
-  // stretches it shows as duplicated rows (the post-blur fixes it). The
-  // interior is never blurred.
+  // Tiny blur over the rim only, after displacement, in px. Chromium samples
+  // the displaced backdrop with nearest neighbour, which shows as speckle where
+  // the rim compresses and duplicated rows where it stretches. The interior is
+  // never blurred.
   edgeSoftness: number
   // Blur of the whole backdrop, in px. 0 is Apple's clear glass, 20+ a sheet.
   frost: number
-  // Split between the red and blue displacement, as a fraction of the scale.
+  // Split between the red and blue rim offsets, as a fraction of the offset.
   // Real glass bends blue more than red, which shows as colour fringes.
   aberration: number
   // 1 is untouched. Apple pushes the backdrop past 1 so colours bleed through.
@@ -28,6 +27,8 @@ export interface GlassSurface {
   specular: number
   // How far the highlight reaches in from the edge, in px.
   specularWidth: number
+  // Brightness of the milky sheen across the bezel, 0..1.
+  glow: number
   // Angle the light comes from, in degrees. 0 is from the top.
   lightAngle: number
   // Opacity of the drop shadow under the glass, 0..1.
@@ -41,6 +42,7 @@ export interface GlassLayers {
   saturation: boolean
   tint: boolean
   specular: boolean
+  glow: boolean
   shadow: boolean
 }
 
@@ -58,16 +60,17 @@ export const defaultShape: GlassShape = {
 
 export const defaultOptics: GlassOptics = {
   strength: 1,
-  edgeSoftness: 1,
+  edgeSoftness: 0.5,
   frost: 0,
-  aberration: 0.1,
+  aberration: 0.3,
   saturation: 1.3,
 }
 
 export const defaultSurface: GlassSurface = {
   tint: 'rgba(255, 255, 255, 0.06)',
-  specular: 0.7,
+  specular: 0.85,
   specularWidth: 2.5,
+  glow: 0.3,
   lightAngle: 315,
   shadow: 0.25,
 }
@@ -79,6 +82,7 @@ export const defaultLayers: GlassLayers = {
   saturation: true,
   tint: true,
   specular: true,
+  glow: true,
   shadow: true,
 }
 
@@ -92,10 +96,68 @@ export function useSupportsBackdropSvg() {
   return supported
 }
 
-export function useGlassMaps(shape: GlassShape, light: GlassLight) {
+type EncodedMaps = Omit<GlassMaps, 'taps' | 'rim' | 'specular' | 'glow'> & {
+  taps: Blob[]
+  rim: Blob
+  specular: Blob
+  glow: Blob
+}
+
+function revoke(maps: GlassMaps) {
+  for (const url of [...maps.taps, maps.rim, maps.specular, maps.glow]) URL.revokeObjectURL(url)
+}
+
+// Maps are built in a worker. Only one request is in flight at a time; while
+// it runs, newer requests replace each other and only the latest is sent. A
+// slider drag produces one map per worker round trip instead of a backlog.
+export function useGlassMaps(shape: GlassShape, light: GlassLight, split: number, strength: number) {
   const [maps, setMaps] = useState<GlassMaps | null>(null)
+  const worker = useRef<Worker | null>(null)
+  const busy = useRef(false)
+  const next = useRef<GlassMapRequest | null>(null)
+
+  function send(request: GlassMapRequest) {
+    if (busy.current) {
+      next.current = request
+      return
+    }
+    busy.current = true
+    next.current = null
+    worker.current!.postMessage(request)
+  }
+
   useEffect(() => {
-    setMaps(buildGlassMaps(shape, light))
+    const w = new Worker(new URL('../lib/liquid-glass.worker.ts', import.meta.url), { type: 'module' })
+    worker.current = w
+    busy.current = false
+    next.current = null
+    w.onmessage = ({ data }: MessageEvent<EncodedMaps>) => {
+      setMaps({
+        ...data,
+        taps: data.taps.map((b) => URL.createObjectURL(b)),
+        rim: URL.createObjectURL(data.rim),
+        specular: URL.createObjectURL(data.specular),
+        glow: URL.createObjectURL(data.glow),
+      })
+      busy.current = false
+      if (next.current) send(next.current)
+    }
+    return () => w.terminate()
+  }, [])
+
+  // Runs after the next set has been committed, so nothing still points at them.
+  useEffect(
+    () => () => {
+      if (maps) revoke(maps)
+    },
+    [maps],
+  )
+
+  // Strength only changes the margin. Rounding it up to half steps keeps the
+  // strength slider from rebuilding the maps on every tick.
+  const reach = Math.max(1, Math.ceil(strength * 2) / 2)
+  useEffect(() => {
+    send({ shape, light, split, reach, dpr: Math.min(3, window.devicePixelRatio || 1) })
   }, [
     shape.width,
     shape.height,
@@ -108,33 +170,65 @@ export function useGlassMaps(shape: GlassShape, light: GlassLight) {
     shape.zoom,
     light.angle,
     light.width,
+    split,
+    reach,
   ])
   return maps
 }
 
-// Keeps only one colour channel and the alpha.
-const keepR = '1 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0'
-const keepG = '0 0 0 0 0  0 1 0 0 0  0 0 0 0 0  0 0 0 1 0'
-const keepB = '0 0 0 0 0  0 0 0 0 0  0 0 1 0 0  0 0 0 1 0'
-// Turns the map's blue channel into alpha, everything else black.
-const blueToAlpha = '0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 1 0 0'
+// Scales the colour channels, keeps alpha.
+const weigh = ({ r, g, b }: { r: number; g: number; b: number }) =>
+  `${r} 0 0 0 0  0 ${g} 0 0 0  0 0 ${b} 0 0  0 0 0 1 0`
 
-interface FilterPlan {
-  scale: number
-  edge: number
-  frost: number
-  split: number
-  saturation: number
-}
+type Primitive = [tag: string, attrs: Record<string, string | number>]
 
-function plan(maps: GlassMaps, optics: GlassOptics, layers: GlassLayers): FilterPlan {
-  return {
-    scale: layers.refraction ? maps.maxOffset * 2 * optics.strength : 0,
-    edge: layers.refraction ? optics.edgeSoftness : 0,
-    frost: layers.frost ? optics.frost : 0,
-    split: layers.aberration ? optics.aberration : 0,
-    saturation: layers.saturation ? optics.saturation : 1,
-  }
+// The filter graph as a flat list, so the live filter and the markup shown in
+// the sandbox can't drift apart.
+//
+// Chromium turns the graph into a tree: a result used twice is computed twice,
+// along with everything that feeds it. So every input that fans out here is a
+// leaf (SourceGraphic or an feImage), and everything that would be shared,
+// like the frost blur, the rim blur and the saturation, is done in CSS around
+// the url() instead. That took the default glass from ~58ms a frame to <8ms.
+function primitives(maps: GlassMaps, optics: GlassOptics, layers: GlassLayers, href: (i: number) => string): Primitive[] {
+  const scale = layers.refraction ? +(maps.maxOffset * 2 * optics.strength).toFixed(2) : 0
+  const list: Primitive[] = []
+  // One displacement map per tap, each with its own share of the spectrum.
+  // The maps already carry the extra bend per tap, so they share one scale.
+  maps.taps.forEach((_, i) => {
+    list.push(
+      [
+        'feImage',
+        {
+          href: href(i),
+          x: 0,
+          y: 0,
+          width: maps.width + maps.pad * 2,
+          height: maps.height + maps.pad * 2,
+          preserveAspectRatio: 'none',
+          result: `map${i}`,
+        },
+      ],
+      [
+        'feDisplacementMap',
+        {
+          in: 'SourceGraphic',
+          in2: `map${i}`,
+          scale,
+          xChannelSelector: 'R',
+          yChannelSelector: 'G',
+          result: `shift${i}`,
+        },
+      ],
+    )
+    if (maps.taps.length === 1) return
+    list.push(['feColorMatrix', { in: `shift${i}`, type: 'matrix', values: weigh(dispersion[i]), result: `tap${i}` }])
+    if (i > 0) {
+      const prev = i === 1 ? 'tap0' : `sum${i - 1}`
+      list.push(['feComposite', { in: prev, in2: `tap${i}`, operator: 'arithmetic', k2: 1, k3: 1, result: `sum${i}` }])
+    }
+  })
+  return list
 }
 
 export function RefractionFilter({
@@ -148,148 +242,43 @@ export function RefractionFilter({
   optics: GlassOptics
   layers: GlassLayers
 }) {
-  const p = plan(maps, optics, layers)
-  // Name of the image that feeds the displacement passes.
-  const prepared = p.frost > 0 ? 'frosted' : p.edge > 0 ? 'softened' : 'SourceGraphic'
-
   return (
     // Zero size but not display:none. Chromium drops filters whose SVG is hidden.
     <svg className="pointer-events-none absolute size-0" aria-hidden>
       <filter id={id} x="0" y="0" width="100%" height="100%" colorInterpolationFilters="sRGB">
-        <feImage
-          href={maps.displacement}
-          x="0"
-          y="0"
-          width={maps.width + maps.pad * 2}
-          height={maps.height + maps.pad * 2}
-          preserveAspectRatio="none"
-          result="map"
-        />
-        {p.edge > 0 && (
-          <>
-            {/* Blur only where the rim mask says so. Interior stays untouched. */}
-            <feColorMatrix in="map" type="matrix" values={blueToAlpha} result="rim" />
-            <feGaussianBlur in="SourceGraphic" stdDeviation={p.edge} result="blurred" />
-            <feComposite in="blurred" in2="rim" operator="in" result="rimBlurred" />
-            <feComposite in="SourceGraphic" in2="rim" operator="out" result="interior" />
-            {/* The two parts are complementary cuts of the same mask, so add them.
-                "over" would leave a dip in alpha where the mask fades. */}
-            <feComposite in="rimBlurred" in2="interior" operator="arithmetic" k2="1" k3="1" result="softened" />
-          </>
+        {primitives(maps, optics, layers, (i) => maps.taps[i]).map(([tag, attrs], i) =>
+          createElement(tag, { key: i, ...attrs }),
         )}
-        {p.frost > 0 && (
-          <feGaussianBlur in={p.edge > 0 ? 'softened' : 'SourceGraphic'} stdDeviation={p.frost} result="frosted" />
-        )}
-        {p.split > 0 ? (
-          <>
-            <feDisplacementMap
-              in={prepared}
-              in2="map"
-              scale={p.scale * (1 - p.split)}
-              xChannelSelector="R"
-              yChannelSelector="G"
-              result="dr"
-            />
-            <feDisplacementMap
-              in={prepared}
-              in2="map"
-              scale={p.scale}
-              xChannelSelector="R"
-              yChannelSelector="G"
-              result="dg"
-            />
-            <feDisplacementMap
-              in={prepared}
-              in2="map"
-              scale={p.scale * (1 + p.split)}
-              xChannelSelector="R"
-              yChannelSelector="G"
-              result="db"
-            />
-            <feColorMatrix in="dr" type="matrix" values={keepR} result="r" />
-            <feColorMatrix in="dg" type="matrix" values={keepG} result="g" />
-            <feColorMatrix in="db" type="matrix" values={keepB} result="b" />
-            {/* Add the three single-channel images back together. */}
-            <feComposite in="r" in2="g" operator="arithmetic" k2="1" k3="1" result="rg" />
-            <feComposite in="rg" in2="b" operator="arithmetic" k2="1" k3="1" result="refracted" />
-          </>
-        ) : (
-          <feDisplacementMap
-            in={prepared}
-            in2="map"
-            scale={p.scale}
-            xChannelSelector="R"
-            yChannelSelector="G"
-            result="refracted"
-          />
-        )}
-        {p.edge > 0 && (
-          <>
-            {/* Same trick after displacement, to smooth the duplicated rows. */}
-            <feGaussianBlur in="refracted" stdDeviation={p.edge * 0.8} result="refractedBlurred" />
-            <feComposite in="refractedBlurred" in2="rim" operator="in" result="rimOut" />
-            <feComposite in="refracted" in2="rim" operator="out" result="interiorOut" />
-            <feComposite in="rimOut" in2="interiorOut" operator="arithmetic" k2="1" k3="1" result="smoothed" />
-          </>
-        )}
-        <feColorMatrix in={p.edge > 0 ? 'smoothed' : 'refracted'} type="saturate" values={String(p.saturation)} />
       </filter>
     </svg>
   )
 }
 
+// The backdrop-filter declaration. Frost runs before the SVG filter and
+// saturation after it, both as CSS functions: Chromium computes each once and
+// hands the result along, where inside the SVG they'd be redone per tap.
+function backdropFilter(url: string | null, optics: GlassOptics, layers: GlassLayers) {
+  const parts: string[] = []
+  if (layers.frost && optics.frost > 0) parts.push(`blur(${optics.frost}px)`)
+  if (url) parts.push(url)
+  if (layers.saturation && optics.saturation !== 1) parts.push(`saturate(${optics.saturation})`)
+  return parts.join(' ') || 'none'
+}
+
 // Same filter as markup, for reading and pasting into the article.
 export function filterMarkup(id: string, maps: GlassMaps, optics: GlassOptics, layers: GlassLayers) {
-  const p = plan(maps, optics, layers)
-  const prepared = p.frost > 0 ? 'frosted' : p.edge > 0 ? 'softened' : 'SourceGraphic'
-  const px = (n: number) => n.toFixed(2)
-  const lines = [
-    `<filter id="${id}" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB">`,
-    `  <feImage href="data:image/png;base64,…" x="0" y="0" width="${maps.width + maps.pad * 2}" height="${maps.height + maps.pad * 2}" preserveAspectRatio="none" result="map" />`,
-  ]
-  if (p.edge > 0) {
-    lines.push(
-      `  <feColorMatrix in="map" type="matrix" values="${blueToAlpha}" result="rim" />`,
-      `  <feGaussianBlur in="SourceGraphic" stdDeviation="${p.edge}" result="blurred" />`,
-      `  <feComposite in="blurred" in2="rim" operator="in" result="rimBlurred" />`,
-      `  <feComposite in="SourceGraphic" in2="rim" operator="out" result="interior" />`,
-      `  <feComposite in="rimBlurred" in2="interior" operator="arithmetic" k2="1" k3="1" result="softened" />`,
-    )
-  }
-  if (p.frost > 0) {
-    lines.push(
-      `  <feGaussianBlur in="${p.edge > 0 ? 'softened' : 'SourceGraphic'}" stdDeviation="${p.frost}" result="frosted" />`,
-    )
-  }
-  if (p.split > 0) {
-    lines.push(
-      `  <feDisplacementMap in="${prepared}" in2="map" scale="${px(p.scale * (1 - p.split))}" xChannelSelector="R" yChannelSelector="G" result="dr" />`,
-      `  <feDisplacementMap in="${prepared}" in2="map" scale="${px(p.scale)}" xChannelSelector="R" yChannelSelector="G" result="dg" />`,
-      `  <feDisplacementMap in="${prepared}" in2="map" scale="${px(p.scale * (1 + p.split))}" xChannelSelector="R" yChannelSelector="G" result="db" />`,
-      `  <feColorMatrix in="dr" type="matrix" values="${keepR}" result="r" />`,
-      `  <feColorMatrix in="dg" type="matrix" values="${keepG}" result="g" />`,
-      `  <feColorMatrix in="db" type="matrix" values="${keepB}" result="b" />`,
-      `  <feComposite in="r" in2="g" operator="arithmetic" k2="1" k3="1" result="rg" />`,
-      `  <feComposite in="rg" in2="b" operator="arithmetic" k2="1" k3="1" result="refracted" />`,
-    )
-  } else {
-    lines.push(
-      `  <feDisplacementMap in="${prepared}" in2="map" scale="${px(p.scale)}" xChannelSelector="R" yChannelSelector="G" result="refracted" />`,
-    )
-  }
-  if (p.edge > 0) {
-    lines.push(
-      `  <feGaussianBlur in="refracted" stdDeviation="${p.edge * 0.8}" result="refractedBlurred" />`,
-      `  <feComposite in="refractedBlurred" in2="rim" operator="in" result="rimOut" />`,
-      `  <feComposite in="refracted" in2="rim" operator="out" result="interiorOut" />`,
-      `  <feComposite in="rimOut" in2="interiorOut" operator="arithmetic" k2="1" k3="1" result="smoothed" />`,
-    )
-  }
-  lines.push(
-    `  <feColorMatrix in="${p.edge > 0 ? 'smoothed' : 'refracted'}" type="saturate" values="${p.saturation}" />`,
-    `</filter>`,
+  const body = primitives(maps, optics, layers, (i) => `map-${i}.png`).map(
+    ([tag, attrs]) =>
+      `  <${tag} ${Object.entries(attrs)
+        .map(([k, v]) => `${k}="${v}"`)
+        .join(' ')} />`,
   )
-  return lines.join('\n')
+  return [
+    `/* backdrop-filter: ${backdropFilter(`url(#${id})`, optics, layers)}; */`,
+    `<filter id="${id}" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB">`,
+    ...body,
+    `</filter>`,
+  ].join('\n')
 }
 
 export function LiquidGlass({
@@ -318,20 +307,13 @@ export function LiquidGlass({
   const filterId = `glass-${id}`
   const ready = supported === true && maps !== null
 
-  const backdrop = useMemo(() => {
-    if (ready) return `url(#${filterId})`
-    // Fallback for browsers without SVG backdrop filters. No refraction.
-    const parts: string[] = []
-    if (layers.frost && optics.frost > 0) parts.push(`blur(${optics.frost}px)`)
-    if (layers.saturation) parts.push(`saturate(${optics.saturation})`)
-    return parts.join(' ') || 'none'
-  }, [ready, filterId, layers.frost, layers.saturation, optics.frost, optics.saturation])
+  // Without SVG backdrop filters this is the blur fallback. No refraction.
+  const backdrop = useMemo(
+    () => backdropFilter(ready ? `url(#${filterId})` : null, optics, layers),
+    [ready, filterId, optics, layers],
+  )
 
   const radius = Math.min(shape.radius, shape.width / 2, shape.height / 2)
-  const a = (surface.lightAngle * Math.PI) / 180
-  // Unit vector pointing toward the light, in CSS coordinates (y down).
-  const lx = Math.sin(a)
-  const ly = -Math.cos(a)
 
   const shadow = layers.shadow
     ? `0 ${Math.round(shape.thickness / 2)}px ${shape.thickness * 1.5}px rgba(0,0,0,${surface.shadow}), 0 1px 2px rgba(0,0,0,${surface.shadow / 2})`
@@ -358,10 +340,40 @@ export function LiquidGlass({
           }}
         />
 
-        {/* 2. Tint. A flat fill that makes the glass read as a material, not a hole. */}
+        {/* 2. Rim softening. A plain CSS blur of what's under it, the refracted
+            layer included, masked to the rim. The compositor does this in one
+            cheap pass; the same thing inside the SVG filter would recompute
+            the whole displacement graph for each input that reads it. */}
+        {ready && layers.refraction && optics.edgeSoftness > 0 && (
+          <div
+            className="absolute inset-0"
+            style={{
+              backdropFilter: `blur(${optics.edgeSoftness}px)`,
+              WebkitBackdropFilter: `blur(${optics.edgeSoftness}px)`,
+              maskImage: `url(${maps.rim})`,
+              maskSize: '100% 100%',
+            }}
+          />
+        )}
+
+        {/* 3. Tint. A flat fill that makes the glass read as a material, not a hole. */}
         {layers.tint && <div className="absolute inset-0" style={{ background: surface.tint }} />}
 
-        {/* 3. Specular rim. Painted per pixel from the edge normals, so it brightens
+        {/* 4. Glow. A soft sheen across the bezel, strongest on the lit diagonals.
+            No mix-blend-mode on this or the specular: in Chromium any blended
+            sibling makes the group a backdrop root and the refraction vanishes. */}
+        {layers.glow && maps && (
+          <div
+            className="absolute inset-0"
+            style={{
+              opacity: surface.glow,
+              backgroundImage: `url(${maps.glow})`,
+              backgroundSize: '100% 100%',
+            }}
+          />
+        )}
+
+        {/* 5. Specular rim. Painted per pixel from the edge normals, so it brightens
             where the edge faces the light, echoes on the far side and fades along
             the straight runs instead of drawing a border. */}
         {layers.specular && maps && (
@@ -374,20 +386,9 @@ export function LiquidGlass({
             }}
           />
         )}
-
-        {/* 4. Inner glow. Soft light bleeding in from the lit edge. */}
-        {layers.specular && (
-          <div
-            className="absolute inset-0"
-            style={{
-              borderRadius: radius,
-              boxShadow: `inset ${(lx * shape.bezel) / 4}px ${(ly * shape.bezel) / 4}px ${shape.bezel / 2}px -${shape.bezel / 4}px rgba(255,255,255,${surface.specular * 0.06})`,
-            }}
-          />
-        )}
       </div>
 
-      {/* 5. Drop shadow. Painted after the filter layer on purpose: anything
+      {/* 6. Drop shadow. Painted after the filter layer on purpose: anything
           painted before it becomes part of the backdrop, and a rim that samples
           outward would drag the shadow in as a dark ring. */}
       {layers.shadow && (

@@ -21,15 +21,6 @@ export const Route = createFileRoute('/lab/liquid-glass')({
 
 const profiles: Profile[] = ['squircle', 'convex', 'concave', 'lip']
 
-// Starting points. "pill" is sized like the selected tab in iOS 26's tab bar.
-const presets = {
-  card: { shape: defaultShape, optics: defaultOptics },
-  pill: {
-    shape: { ...defaultShape, width: 168, height: 92, radius: 46, bezel: 14, thickness: 40, zoom: 1.12 },
-    optics: { ...defaultOptics, aberration: 0.14 },
-  },
-} as const
-
 const tints = {
   clear: 'rgba(255, 255, 255, 0)',
   light: 'rgba(255, 255, 255, 0.08)',
@@ -38,16 +29,37 @@ const tints = {
   accent: 'rgba(255, 59, 31, 0.18)',
 } as const
 
+// Starting points, each matched against a screenshot of iOS 26.
+const presets = {
+  card: { shape: defaultShape, optics: defaultOptics, surface: defaultSurface },
+  // The selected-tab lens in the tab bar while you drag it. Clear, magnifying,
+  // with a thick rim that folds the outside in and splits it into a rainbow.
+  pill: {
+    shape: { ...defaultShape, width: 180, height: 104, radius: 52, bezel: 20, thickness: 48, zoom: 1.16 },
+    optics: { ...defaultOptics, aberration: 0.5 },
+    surface: { ...defaultSurface, tint: tints.clear, glow: 0.2, specular: 0.95 },
+  },
+  // A Control Center toggle. Frosted and saturated, with a wide milky rim.
+  button: {
+    shape: { ...defaultShape, width: 120, height: 120, radius: 60, bezel: 28, thickness: 32, zoom: 1.08 },
+    optics: { ...defaultOptics, frost: 5, aberration: 0.15, saturation: 1.6 },
+    surface: { ...defaultSurface, tint: tints.light, glow: 0.5, specular: 0.8 },
+  },
+} as const
+
 // What each layer contributes. Doubles as the outline for the article.
 const layerNotes: Record<keyof GlassLayers, string> = {
   refraction:
     'feDisplacementMap driven by a map solved with Snell\'s law. With "out" the rim squeezes exterior content into the edge like a glass sphere, which is how Apple\'s reads; "in" is a magnifier on paper. Chromium only through backdrop-filter: url().',
-  frost: 'feGaussianBlur over the whole backdrop. Apple uses none on clear controls and a lot on sheets. Separate from this, a ~1px blur is confined to the rim before and after displacement to hide the speckle and row duplication from Chromium\'s nearest-neighbour sampling.',
+  frost:
+    'A CSS blur() placed before the url() in the same backdrop-filter, so it runs once instead of once per tap. Apple uses none on clear controls and a lot on sheets. Separate from this, a masked CSS backdrop blur over the rim hides the speckle and row duplication from Chromium\'s nearest-neighbour sampling.',
   aberration:
-    'Three displacement passes at slightly different scales, one colour channel kept from each, added back together. Blue bends most.',
-  saturation: 'feColorMatrix saturate above 1. The backdrop colours bleed into the glass more than they would through a neutral filter.',
+    'Five displacement maps, one per tap, each with the rim offset bent a little more than the last. Each tap keeps a share of the spectrum and they add back together, so the rim fans red to violet. Only the rim offset is split, so the flat interior stays clean.',
+  saturation: 'CSS saturate() after the url(), above 1. The backdrop colours bleed into the glass more than they would through a neutral filter.',
   tint: 'A flat translucent fill over the refracted backdrop. Alpha is how frosted the material feels.',
-  specular: 'A bitmap painted from the edge normals: bright where the rim faces the light, a dimmer echo on the far side, nothing along the sides. Plus a faint inset glow.',
+  specular:
+    'A bitmap painted from the edge normals: bright where the rim faces the light, nearly as bright on the far side, fading along the sides.',
+  glow: 'The same two lobes spread across the whole bezel. The milky band inside the edge of Control Center buttons.',
   shadow: 'A soft drop shadow tied to the thickness. Lifts the glass off the content so the refraction reads as depth.',
 }
 
@@ -62,7 +74,12 @@ function Sandbox() {
   const [showCode, setShowCode] = useState(false)
 
   const supported = useSupportsBackdropSvg()
-  const maps = useGlassMaps(shape, { angle: surface.lightAngle, width: surface.specularWidth })
+  const maps = useGlassMaps(
+    shape,
+    { angle: surface.lightAngle, width: surface.specularWidth },
+    layers.refraction && layers.aberration ? optics.aberration : 0,
+    optics.strength,
+  )
 
   const patch =
     <T,>(set: React.Dispatch<React.SetStateAction<T>>) =>
@@ -82,6 +99,7 @@ function Sandbox() {
   function applyPreset(name: keyof typeof presets) {
     setShape(presets[name].shape)
     setOptics(presets[name].optics)
+    setSurface(presets[name].surface)
   }
 
   return (
@@ -120,7 +138,7 @@ function Sandbox() {
         <Section title="Preset">
           <Segmented
             value={(Object.keys(presets) as (keyof typeof presets)[]).find((k) => presets[k].shape === shape) ?? 'custom'}
-            options={['card', 'pill', 'custom'] as const}
+            options={['card', 'pill', 'button', 'custom'] as const}
             onChange={(k) => k !== 'custom' && applyPreset(k)}
           />
         </Section>
@@ -161,6 +179,7 @@ function Sandbox() {
             onChange={(k) => setF('tint', tints[k])}
           />
           <Range label="Specular" value={surface.specular} min={0} max={1} step={0.05} onChange={(v) => setF('specular', v)} />
+          <Range label="Glow" value={surface.glow} min={0} max={1} step={0.05} onChange={(v) => setF('glow', v)} />
           <Range label="Rim width" value={surface.specularWidth} min={1} max={24} step={0.5} onChange={(v) => setF('specularWidth', v)} />
           <Range label="Light angle" value={surface.lightAngle} min={0} max={360} step={5} onChange={(v) => setF('lightAngle', v)} />
           <Range label="Shadow" value={surface.shadow} min={0} max={1} step={0.05} onChange={(v) => setF('shadow', v)} />
@@ -184,15 +203,15 @@ function Sandbox() {
           {showMap && maps && (
             <div className="flex flex-col gap-1.5">
               <img
-                src={maps.displacement}
+                src={maps.taps[maps.taps.length >> 1]}
                 alt="Displacement map"
                 width={maps.width}
                 height={maps.height}
                 className="max-w-full rounded border border-line/40"
               />
               <p className="text-muted">
-                Red is the horizontal offset, green the vertical, 128 is no movement. Blue is the rim mask the
-                anti-aliasing blur is confined to.
+                The middle dispersion tap. Red is the horizontal offset, green the vertical, 128 is no movement.
+                The other taps differ only on the rim.
               </p>
               <img
                 src={maps.specular}
@@ -202,6 +221,14 @@ function Sandbox() {
                 className="max-w-full rounded border border-line/40 bg-[#333]"
               />
               <p className="text-muted">Specular map. White with alpha, laid over the glass as a background image.</p>
+              <img
+                src={maps.glow}
+                alt="Glow map"
+                width={maps.width}
+                height={maps.height}
+                className="max-w-full rounded border border-line/40 bg-[#333]"
+              />
+              <p className="text-muted">Glow map. Same lobes as the specular, spread over the bezel.</p>
             </div>
           )}
           <Toggle label="Show filter markup" checked={showCode} onChange={setShowCode} />
